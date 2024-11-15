@@ -1,0 +1,38 @@
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-workspace
+
+# Virtual environment
+venv/
+env/
+
+# Distribution / Packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.tgz
+
+# Test and coverage directories
+.coverage
+*.cover
+nosetests.xml
+coverage.xml
+*.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# MySQL or SQLite databases
+*.db
+*.sqlite
+
+# Logs
+*.log
