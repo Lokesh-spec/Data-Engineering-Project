@@ -19,10 +19,15 @@ class PubSubPublisher:
         except AlreadyExists:
             logging.info(f"Topic '{topic_name}' already exists.")
 
+    ## Testing purpose
     def publish_message(self, topic_name: str, message: str) -> None:
         topic = f"projects/{self.project_id}/topics/{topic_name}"
-        future = self.publisher.publish(topic, message.encode('utf-8'))
-        logging.info(f"Message '{message}' published to topic '{topic_name}'.")
+        try:
+            future = self.publisher.publish(topic, message.encode('utf-8'))
+            message_id = future.result()
+            logging.info(f"Message '{message}' published to topic '{topic_name}' with ID: {message_id}")
+        except Exception as e:
+            logging.error(f"Failed to publish message: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Publisher: Creating topic and publishing messages.")
@@ -37,11 +42,8 @@ def main():
 
     publisher = PubSubPublisher(project_id=project_id)
     
-    # Create the topic if it doesn't exist
     publisher.create_topic(topic_name=topic_name)
-    
-    # Publish the message to the topic
-    publisher.publish_message(topic_name=topic_name, message=message)
+    # publisher.publish_message(topic_name=topic_name, message=message)
 
 if __name__ == "__main__":
     main()

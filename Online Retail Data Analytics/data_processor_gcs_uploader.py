@@ -64,30 +64,36 @@ class SplitDataByDateRegion:
     def split_and_upload(self, split_by: str) -> None:
         """Splits data by the specified column ('Country' or 'Date') and uploads the files."""
         try:
-            # Process the CSV in chunks to handle large files
-            chunks = pd.read_csv(self.file_path, chunksize=100000)
-            for chunk in chunks:
-                if split_by == "region":
-                    unique_values = chunk["Country"].unique()
-                    for value in unique_values:
-                        region_df = chunk[chunk["Country"] == value]
-                        file_name = f"Data/{self.blob_list[0]}/{value}-Invoice.csv"
-                        region_df.to_csv(file_name, index=False)
-                        self.upload_blob(file_name, f"{self.blob_list[0]}/{value}-Invoice.csv")
-                        os.remove(file_name)
-                elif split_by == "day":
-                    chunk["InvoiceDate"] = pd.to_datetime(chunk["InvoiceDate"])
-                    chunk["Date"] = chunk["InvoiceDate"].dt.date.astype(str)
-                    unique_dates = chunk["Date"].unique()
-                    for date in unique_dates:
-                        date_df = chunk[chunk["Date"] == date]
-                        file_name = f"Data/{self.blob_list[1]}/{date}-Invoice.csv"
-                        date_df.to_csv(file_name, index=False)
-                        self.upload_blob(file_name, f"{self.blob_list[1]}/{date}-Invoice.csv")
-                        os.remove(file_name)
+            # Read the entire CSV into memory
+            df = pd.read_csv(self.file_path)
+            
+            if split_by == "region":
+                unique_values = df["Country"].unique()
+                for value in unique_values:
+                    region_df = df[df["Country"] == value]
+                    file_name = f"Data/{self.blob_list[0]}/{value}-Invoice.csv"
+                    region_df.to_csv(file_name, index=False)
+                    self.upload_blob(file_name, f"{self.blob_list[0]}/{value}-Invoice.csv")
+                    os.remove(file_name)
+                    break
+            
+            elif split_by == "day":
+                df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"])
+                df["Date"] = df["InvoiceDate"].dt.date.astype(str)
+                unique_dates = df["Date"].unique()
+                for date in unique_dates:
+                    date_df = df[df["Date"] == date]
+                    file_name = f"Data/{self.blob_list[1]}/{date}-Invoice.csv"
+                    date_df.to_csv(file_name, index=False)
+                    self.upload_blob(file_name, f"{self.blob_list[1]}/{date}-Invoice.csv")
+                    os.remove(file_name)
+                    break
+            
             logging.info(f"Data successfully split by {split_by} and uploaded.")
+        
         except Exception as e:
             logging.error(f"Error while splitting and uploading data by {split_by}: {e}")
+
 
 def main():
     start_time = datetime.now()
