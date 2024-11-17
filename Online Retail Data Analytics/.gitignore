@@ -36,3 +36,8 @@ coverage.xml
 
 # Logs
 *.log
+
+
+temp/
+processed/
+Data/

@@ -243,8 +243,20 @@ python subscriber.py --project_id YOUR_PROJECT_ID --topic_name YOUR_TOPIC_NAME -
 
 ---
 
+## Create and List Notification using GCP CLI
+
+``` bash
+gsutil notification create -t projects/kinetic-guild-441706-k8/topics/retail-data-by-day-region -f json -e OBJECT_FINALIZE gs://online-retail-invoice
+```
+
+``` bash
+gsutil notification list gs://online-retail-invoice
+```
+
 ## Conclusion:
 
 - The **publisher script** is responsible for creating a topic and sending test messages to it.
 - The **subscriber script** creates a subscription and listens for messages (or pulls them manually for testing).
 - These scripts form the foundation for interacting with Pub/Sub, creating topics and subscriptions, and processing messages. They can be expanded to handle different message processing workflows in real-time streaming applications.
+
+

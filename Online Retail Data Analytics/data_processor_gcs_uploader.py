@@ -1,4 +1,5 @@
 import os
+import time
 import argparse
 import logging
 from datetime import datetime
@@ -62,6 +63,7 @@ class SplitDataByDateRegion:
             logging.error(f"Failed to list blobs: {e}")
 
     def split_and_upload(self, split_by: str) -> None:
+        # sourcery skip: extract-duplicate-method, move-assign-in-block, switch
         """Splits data by the specified column ('Country' or 'Date') and uploads the files."""
         try:
             # Read the entire CSV into memory
@@ -87,7 +89,7 @@ class SplitDataByDateRegion:
                     date_df.to_csv(file_name, index=False)
                     self.upload_blob(file_name, f"{self.blob_list[1]}/{date}-Invoice.csv")
                     os.remove(file_name)
-                    break
+                    time.sleep(5)
             
             logging.info(f"Data successfully split by {split_by} and uploaded.")
         
@@ -118,7 +120,7 @@ def main():
     processor.create_folders_in_bucket()
     processor.list_blobs()
     processor.split_and_upload("day")
-    processor.split_and_upload("region")
+    # processor.split_and_upload("region")
 
     logging.info(f"Script completed in {datetime.now() - start_time}")
 
