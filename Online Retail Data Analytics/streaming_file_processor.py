@@ -68,7 +68,7 @@ def run():
     google_cloud_options = options.view_as(GoogleCloudOptions)
     
     # Set your GCP project and staging/temp locations
-    google_cloud_options.project = 'kinetic-guild-441706-k8'  # Replace with your GCP project ID
+    google_cloud_options.project = 'project_id'  # Replace with your GCP project ID
     google_cloud_options.region = 'us-central1'       # Replace with your region
     google_cloud_options.temp_location = 'gs://streaming-datapipeline-temp/tmp/'  # Replace with your bucket
     google_cloud_options.staging_location = 'gs://streaming-data-pipeline-staging/staging/'  # Replace with your bucket
@@ -76,7 +76,7 @@ def run():
     # Set runner (DirectRunner for local testing)
     options.view_as(beam.options.pipeline_options.StandardOptions).runner = 'DirectRunner'  # or 'DataflowRunner' for cloud
     
-    output_table = "kinetic-guild-441706-k8:sales_analysis.country_sales_summary"
+    output_table = "project_id:sales_analysis.country_sales_summary"
 
     with beam.Pipeline(options=options) as p:
         input = (
