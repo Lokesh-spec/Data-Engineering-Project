@@ -2,53 +2,23 @@ import json
 import csv
 import datetime
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
 from apache_beam.io.gcp.gcsio import GcsIO
-from collections import namedtuple
-import logging
+from apache_beam import window
+from datetime import datetime
+from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 
-# Define the timestamp for dynamic file naming
-timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-# Define output path
-output_path = f"./processed/results-{timestamp}"
-
-# Define a NamedTuple to represent the schema of the CSV rows
-Row = namedtuple(
-    'Row', ['InvoiceNo', 'StockCode', 'Description', 'Quantity', 'InvoiceDate', 'UnitPrice', 'CustomerID', 'Country']
-)
-
-# Replace None or empty values with default values
-def handle_missing_values(row, default_values=None):
-    default_values = default_values or {}
-    return {
-        key: (value if value else default_values.get(key, 'Unknown')) for key, value in row.items()
-    }
-
-# Updated filter_out_nulls function
-def filter_out_nulls(row, critical_fields):
-    return all(row.get(field) and row[field].strip() for field in critical_fields)
-
-# Updated ProcessData class with logging
-class ProcessData(beam.DoFn):
-    def __init__(self, default_values, critical_fields):
-        self.default_values = default_values
-        self.critical_fields = critical_fields
-
+class AddTimestampDoFn(beam.DoFn):
+    """
+    Adds an event timestamp to each element based on the InvoiceDate field.
+    """
     def process(self, element):
-        logging.info(f"Processing row: {element}")
-        element = handle_missing_values(element, self.default_values)
+        invoice_date = element["InvoiceDate"]
+        yield beam.window.TimestampedValue(element, invoice_date.timestamp())
 
-        if filter_out_nulls(element, self.critical_fields):
-            logging.info(f"Valid row: {element}")
-            yield element
-        else:
-            logging.warning(f"Invalid row: {element}")
-            yield {**element, 'status': 'Invalid'}
-
-# Read and process CSV files from GCS
 def process_file(element):
-    # sourcery skip: inline-immediately-yielded-variable, yield-from
     message = json.loads(element)
     bucket_name = message['bucket']
     file_name = message['name']
@@ -57,49 +27,93 @@ def process_file(element):
     gcsio = GcsIO()
     file_content = gcsio.open(gcs_path).read().decode('utf-8')
 
-    # Use csv.DictReader for structured row parsing
-    reader = csv.DictReader(file_content.splitlines())
-    for row in reader:
-        yield row
+    yield from csv.DictReader(file_content.splitlines())
 
-# Format rows into CSV strings for output
-def format_row(row):
-    return f"{row['InvoiceNo']},{row['StockCode']},{row['Description']},{row['Quantity']},{row['InvoiceDate']},{row['UnitPrice']},{row['CustomerID']},{row['Country']}"
+def parse_and_filter_csv_row(element):
+    if "," in element["Description"]:
+        element["Description"] = " ".join(element["Description"].split(","))
+    try:
+        if int(element["Quantity"]) < 0 or element["UnitPrice"] == "0.0" or not element["CustomerID"]:
+            return None 
+        return {
+            "InvoiceNo": str(element["InvoiceNo"]),
+            "StockCode": str(element["StockCode"]),
+            "Description": str(element["Description"]),
+            "Quantity": int(element["Quantity"]),
+            "InvoiceDate": datetime.strptime(element["InvoiceDate"], '%Y-%m-%d %H:%M:%S'),
+            "UnitPrice": float(element["UnitPrice"]),
+            "CustomerID": str(int(float(element["CustomerID"]))),
+            "Country": str(element["Country"])
+        }
+    except ValueError:
+        return None
+
+def compute_sales(element):
+    element["Sales"] = round(element["Quantity"] * element["UnitPrice"], 2)
+    return element
+
+def prepare_for_bigquery(element, window=beam.DoFn.WindowParam):
+    window_start = window.start.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
+    window_end = window.end.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
+    return {
+        "window_start": window_start,
+        "window_end": window_end,
+        "country": element[0],
+        "total_sales": element[1]
+    }
 
 def run():
     # Define pipeline options
-    options = PipelineOptions(
-        runner="DirectRunner",  # Use DataflowRunner for production
-        temp_location='./temp/',  # Temporary location for intermediate data
-        save_main_session=True  # Save main session for pickling
-    )
-
-    default_values = {
-        'InvoiceNo': 'Unknown',
-        'StockCode': 'Unknown',
-        'Description': '',
-        'Quantity': '0',
-        'InvoiceDate': '1970-01-01',
-        'UnitPrice': '0.0',
-        'CustomerID': 'Unknown',
-        'Country': 'Unknown'
-    }
-    critical_fields = ['InvoiceNo', 'StockCode', 'Quantity', 'InvoiceDate']
+    options = PipelineOptions()
+    google_cloud_options = options.view_as(GoogleCloudOptions)
+    
+    # Set your GCP project and staging/temp locations
+    google_cloud_options.project = 'kinetic-guild-441706-k8'  # Replace with your GCP project ID
+    google_cloud_options.region = 'us-central1'       # Replace with your region
+    google_cloud_options.temp_location = 'gs://streaming-datapipeline-temp/tmp/'  # Replace with your bucket
+    google_cloud_options.staging_location = 'gs://streaming-data-pipeline-staging/staging/'  # Replace with your bucket
+    
+    # Set runner (DirectRunner for local testing)
+    options.view_as(beam.options.pipeline_options.StandardOptions).runner = 'DirectRunner'  # or 'DataflowRunner' for cloud
+    
+    output_table = "kinetic-guild-441706-k8:sales_analysis.country_sales_summary"
 
     with beam.Pipeline(options=options) as p:
-        (
+        input = (
             p
-            | 'Mock PubSub Messages' >> beam.Create([
+            | 'Mock PubSub Messages' >> beam.Create([ 
                 json.dumps({'bucket': 'online-retail-invoice', 'name': '2010-12-01-Invoice.csv'}),
                 json.dumps({'bucket': 'online-retail-invoice', 'name': '2010-12-02-Invoice.csv'}),
                 json.dumps({'bucket': 'online-retail-invoice', 'name': '2010-12-03-Invoice.csv'})
             ])
-
             | 'Process Files' >> beam.FlatMap(process_file)
-            | 'Clean and Validate Data' >> beam.ParDo(ProcessData(default_values, critical_fields))
-            | 'Format to CSV' >> beam.Map(format_row)
-            | 'Write Results' >> beam.io.WriteToText(output_path, file_name_suffix='.csv')
+            | 'Parse the Data Type' >> beam.Map(parse_and_filter_csv_row)
+            | 'Filter Valid Rows' >> beam.Filter(lambda x: x is not None)
+            | "Add Timestamps" >> beam.ParDo(AddTimestampDoFn())
+            | "Apply Fixed Window" >> beam.WindowInto(beam.window.FixedWindows(3600))
+            | 'Compute Sales' >> beam.Map(compute_sales)
+        )
+        
+        country_sales = (
+            input
+            | "Key By Country" >> beam.Map(lambda record: (record["Country"], record["Sales"]))
+            | "Aggregate Sales by Country" >> beam.CombinePerKey(sum)
+            | "Prepare for BigQuery" >> beam.Map(prepare_for_bigquery)
+            | 'Write to BigQuery' >> WriteToBigQuery(
+                table=output_table,
+                schema={
+                    "fields": [
+                        {"name": "window_start", "type": "TIMESTAMP", "mode": "REQUIRED"},
+                        {"name": "window_end", "type": "TIMESTAMP", "mode": "REQUIRED"},
+                        {"name": "country", "type": "STRING", "mode": "REQUIRED"},
+                        {"name": "total_sales", "type": "FLOAT", "mode": "REQUIRED"}
+                    ]
+                },
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_IF_NEEDED
+            )
         )
 
 if __name__ == '__main__':
     run()
+
