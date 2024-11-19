@@ -69,27 +69,38 @@ class SplitDataByDateRegion:
             # Read the entire CSV into memory
             df = pd.read_csv(self.file_path)
             
+            
             if split_by == "region":
+                count = 0
                 unique_values = df["Country"].unique()
                 for value in unique_values:
                     region_df = df[df["Country"] == value]
-                    file_name = f"Data/{self.blob_list[0]}/{value}-Invoice.csv"
+                    file_name = f"Data/{self.blob_list[1]}/{value}-Invoice.csv"
                     region_df.to_csv(file_name, index=False)
                     self.upload_blob(file_name, f"{self.blob_list[0]}/{value}-Invoice.csv")
                     os.remove(file_name)
-                    break
+                    count += 1
+                    time.sleep(5)
+                    
+                    if count == 5:
+                        break
             
             elif split_by == "day":
+                count = 0
                 df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"])
                 df["Date"] = df["InvoiceDate"].dt.date.astype(str)
                 unique_dates = df["Date"].unique()
                 for date in unique_dates:
                     date_df = df[df["Date"] == date]
-                    file_name = f"Data/{self.blob_list[1]}/{date}-Invoice.csv"
+                    file_name = f"Data/{self.blob_list[0]}/{date}-Invoice.csv"
                     date_df.to_csv(file_name, index=False)
                     self.upload_blob(file_name, f"{self.blob_list[1]}/{date}-Invoice.csv")
                     os.remove(file_name)
+                    count += 1
                     time.sleep(5)
+                    
+                    if count == 5:
+                        break
             
             logging.info(f"Data successfully split by {split_by} and uploaded.")
         
