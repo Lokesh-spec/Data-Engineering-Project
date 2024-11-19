@@ -1,1 +1,61 @@
-python streaming_file_processor.py --runner=DataflowRunner --project=kinetic-guild-441706-k8 --region=us-central1 --temp_location=gs://streaming-datapipeline-temp/tmp/ --staging_location=gs://streaming-data-pipeline-staging/staging/ --service_account=gcp-data-engineering@kinetic-guild-441706-k8.iam.gserviceaccount.com --job_name=online-retail --input_subscription=projects/kinetic-guild-441706-k8/subscriptions/retail-data-by-day-region-sub --country_table=kinetic-guild-441706-k8.sales_analysis.country_sales_summary --customer_table=kinetic-guild-441706-k8.sales_analysis.customer_sales_summary
+python streaming_file_processor.py --runner=DirectRunner --project=kinetic-guild-441706-k8 --region=us-central1 --temp_location=gs://streaming-datapipeline-temp/tmp/ --staging_location=gs://streaming-data-pipeline-staging/staging/ --service_account=gcp-data-engineering@kinetic-guild-441706-k8.iam.gserviceaccount.com --job_name=online-retail --input_subscription=projects/kinetic-guild-441706-k8/subscriptions/retail-data-by-day-region-sub --country_table=kinetic-guild-441706-k8.sales_analysis.country_sales_summary --customer_table=kinetic-guild-441706-k8.sales_analysis.customer_sales_summary
+
+
+python3 -m apache_beam.examples.wordcount --region us-central1 --input gs://dataflow-samples/shakespeare/kinglear.txt --output gs://dataflow-apache-quickstart_kinetic-guild-441706-k8/results/output --runner DataflowRunner --project kinetic-guild-441706-k8 --temp_location gs://dataflow-apache-quickstart_kinetic-guild-441706-k8/temp/
+
+
+python data_processor_gcs_uploader.py --input_file_path=Online_Retail.csv --bucket_name=online-retail-invoice --blob_list=online_retail_invoice_region_wise,online_retail_invoice_day_wise
+
+import apache_beam as beam
+
+class SumAndCount(beam.CombineFn):
+    def create_accumulator(self):
+        # The accumulator is a tuple: (sum, count)
+        return (0, 0)
+
+    def add_input(self, accumulator, element):
+        # Adding an element: sum the values and count the elements
+        current_sum, current_count = accumulator
+        return (current_sum + element, current_count + 1)
+
+    def merge_accumulators(self, accumulators):
+        # Merging multiple accumulators: add up the sums and counts
+        total_sum, total_count = (0, 0)
+        for acc in accumulators:
+            sum_part, count_part = acc
+            total_sum += sum_part
+            total_count += count_part
+        return (total_sum, total_count)
+
+    def extract_output(self, accumulator):
+        # The final output is the sum and the count
+        total_sum, total_count = accumulator
+        if total_count > 0:
+            average = total_sum / total_count
+        else:
+            average = 0
+        return (total_sum, total_count, average)
+
+
+def run_pipeline():
+    # Define your pipeline
+    with beam.Pipeline() as pipeline:
+        input_data = [
+            ('a', 1),
+            ('b', 2),
+            ('a', 3),
+            ('b', 4),
+            ('a', 5),
+            ('b', 6),
+        ]
+
+        result = (
+            pipeline
+            | 'Create input' >> beam.Create(input_data)
+            | 'Combine per key' >> beam.CombinePerKey(SumAndCount())
+            | 'Format result' >> beam.Map(lambda kv: f'Key: {kv[0]}, Sum: {kv[1][0]}, Count: {kv[1][1]}, Average: {kv[1][2]:.2f}')
+            | 'Print results' >> beam.Map(print)
+        )
+
+if _name_ == '_main_':
+    run_pipeline()

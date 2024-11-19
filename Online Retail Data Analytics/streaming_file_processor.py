@@ -10,49 +10,62 @@ from apache_beam.io.gcp.gcsio import GcsIO
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.window import FixedWindows
 from datetime import datetime
+from apache_beam.transforms.trigger import AfterProcessingTime, AccumulationMode
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO)  # You can adjust the level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+logger = logging.getLogger(__name__)
+
+
+class ParseFilePath(beam.DoFn):
+    def process(self, element):
+        try:
+            message = json.loads(element.decode('utf-8'))
+            bucket_name = message['bucket']
+            file_name = message['name']
+            gcs_path = f"gs://{bucket_name}/{file_name}"
+            if gcs_path.endswith('.csv'):
+                logger.info(f"Processing file: {gcs_path}")
+                yield gcs_path
+            else:
+                logger.info(f"Skipping non-CSV file: {gcs_path}")
+        except Exception as e:
+            logger.error(f"Error processing Pub/Sub message: {e}")
+
+class DeduplicateFiles(beam.DoFn):
+    def __init__(self):
+        self.processed_files = set()
+
+    def process(self, element):
+        if element not in self.processed_files:
+            self.processed_files.add(element)
+            yield element
+        else:
+            logger.info(f"Duplicate file ignored: {element}")
 
 class AddTimestampDoFn(beam.DoFn):
     def process(self, element):
         try:
             invoice_date = element["InvoiceDate"]
-            logging.info(f"Processing timestamp for InvoiceDate: {invoice_date}")
             yield beam.window.TimestampedValue(element, invoice_date.timestamp())
-        except KeyError as e:
-            logging.error(f"Missing InvoiceDate in element: {element}, Error: {e}")
         except Exception as e:
-            logging.error(f"Error adding timestamp: {e}")
+            logger.error(f"Error adding timestamp: {e}")
 
-def process_file(element):
-    message = json.loads(element)
-    bucket_name = message['bucket']
-    file_name = message['name']
-
-    gcs_path = f"gs://{bucket_name}/online_retail_invoice_region_wise/{file_name}"
-    logging.info(f"Processing file from GCS: {gcs_path}")
+def process_file(gcs_path):
     gcsio = GcsIO()
     try:
         file_content = gcsio.open(gcs_path, 'r').read().decode('utf-8')
-        logging.info(f"File {file_name} read successfully.")
         yield from csv.DictReader(file_content.splitlines())
     except Exception as e:
-        logging.error(f"Error reading file {file_name} from bucket {bucket_name}: {e}")
+        logger.error(f"Error reading file {gcs_path}: {e}")
 
 def parse_and_filter_csv_row(element):
     try:
         if "," in element["Description"]:
             element["Description"] = " ".join(element["Description"].split(","))
-
         if int(element["Quantity"]) < 0 or float(element["UnitPrice"]) <= 0.0 or not element.get("CustomerID"):
-            logging.warning(f"Invalid row filtered out: {element}")
             return None
-
-        parsed_row = {
+        return {
             "InvoiceNo": str(element["InvoiceNo"]),
             "StockCode": str(element["StockCode"]),
             "Description": str(element["Description"]),
@@ -62,41 +75,27 @@ def parse_and_filter_csv_row(element):
             "CustomerID": str(int(float(element["CustomerID"]))),
             "Country": str(element["Country"]),
         }
-        logging.debug(f"Parsed row: {parsed_row}")
-        return parsed_row
-    except (ValueError, KeyError) as e:
-        logging.error(f"Error parsing row {element}: {e}")
+    except Exception as e:
+        logger.error(f"Error parsing row: {e}")
         return None
 
 def compute_sales(element):
     try:
         element["Sales"] = round(element["Quantity"] * element["UnitPrice"], 2)
-        logging.debug(f"Computed sales for element: {element}")
         return element
     except Exception as e:
-        logging.error(f"Error computing sales for element {element}: {e}")
+        logger.error(f"Error computing sales: {e}")
 
-def prepare_for_bigquery_country_sales(element, window=beam.DoFn.WindowParam):
+def prepare_for_bigquery(element, window=beam.DoFn.WindowParam):
     window_start = window.start.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
     window_end = window.end.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
-    logging.info(f"Preparing country sales summary for window {window_start} - {window_end}")
     return {
         "start_date_time": window_start,
         "end_date_time": window_end,
-        "country": element[0],
+        "key": element[0],
         "total_sales": round(element[1], 2)
     }
 
-def prepare_for_bigquery_customer_sales(element, window=beam.DoFn.WindowParam):
-    window_start = window.start.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
-    window_end = window.end.to_utc_datetime().strftime('%Y-%m-%d %H:%M:%S')
-    logging.info(f"Preparing customer sales summary for window {window_start} - {window_end}")
-    return {
-        "start_date_time": window_start,
-        "end_date_time": window_end,
-        "customer": element[0],
-        "total_sales": round(element[1], 2)
-    }
 
 def get_args():
     parser = argparse.ArgumentParser(description="Run Apache Beam pipeline on Dataflow")
@@ -110,7 +109,12 @@ def get_args():
     parser.add_argument('--input_subscription', required=True, help="Pub/Sub subscription for input data")
     parser.add_argument('--country_table', required=True, help="BigQuery table for country sales summary")
     parser.add_argument('--customer_table', required=True, help="BigQuery table for customer sales summary")
+    parser.add_argument('--allow_unsafe_triggers')
     return parser.parse_args()
+
+
+
+
 
 def run():
     args = get_args()
@@ -130,50 +134,75 @@ def run():
     logging.info("Starting Apache Beam pipeline.")
 
     with beam.Pipeline(options=options) as p:
-        input_data = (
+        messages = (
             p
-            | 'Read from PubSub' >> ReadFromPubSub(subscription=args.input_subscription)
-            | 'Process Files' >> beam.FlatMap(process_file)
-            | 'Parse CSV Rows' >> beam.Map(parse_and_filter_csv_row)
-            | 'Filter Valid Rows' >> beam.Filter(lambda x: x is not None)
-            | 'Add Timestamps' >> beam.ParDo(AddTimestampDoFn())
-            | 'Apply Fixed Window' >> beam.WindowInto(FixedWindows(3600))
-            | 'Compute Sales' >> beam.Map(compute_sales)
+            | 'Read from Pub/Sub' >> ReadFromPubSub(subscription=args.input_subscription)
+            | 'Parse File Path' >> beam.ParDo(ParseFilePath())
         )
 
-        # (
-        #     input_data
-        #     | 'Key By Country' >> beam.Map(lambda record: (record["Country"], record["Sales"]))
-        #     | 'Aggregate Sales by Country' >> beam.CombinePerKey(sum)
-        #     | 'Prepare for BigQuery Country Sales' >> beam.Map(prepare_for_bigquery_country_sales)
-        #     | 'Write to BigQuery Country Table' >> WriteToBigQuery(
-        #         table=args.country_table,
-        #         schema={
-        #             "fields": [
-        #                 {"name": "start_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
-        #                 {"name": "end_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
-        #                 {"name": "country", "type": "STRING", "mode": "NULLABLE"},
-        #                 {"name": "total_sales", "type": "FLOAT", "mode": "NULLABLE"}
-        #             ]
-        #         },
-        #         write_disposition=BigQueryDisposition.WRITE_APPEND,
-        #         create_disposition=BigQueryDisposition.CREATE_IF_NEEDED
-        #     )
-        # )
+        deduplicated_files = (
+            messages
+            | 'Deduplicate Files' >> beam.ParDo(DeduplicateFiles())
+        )
 
+        lines = (
+            deduplicated_files
+            | 'Process Files' >> beam.FlatMap(process_file)
+        )
+
+        parsed_data = (
+            lines
+            | 'Parse CSV Rows' >> beam.Map(parse_and_filter_csv_row)
+            | 'Filter Valid Rows' >> beam.Filter(lambda x: x is not None)
+        )
+
+        windowed_data = (
+            parsed_data
+            | 'Add Timestamps' >> beam.ParDo(AddTimestampDoFn())
+            | 'Apply Fixed Window' >> beam.WindowInto(FixedWindows(20))
+        )
+
+        sales_data = (
+            windowed_data
+            | 'Compute Sales' >> beam.Map(compute_sales)
+            | 'print' >> beam.Map(print)
+        )
+
+        # Country-Level Aggregation
         (
-            input_data
+            sales_data
+            | 'Key By Country' >> beam.Map(lambda record: (record["Country"], record["Sales"]))
+            | 'Aggregate Sales by Country' >> beam.CombinePerKey(sum)
+            | 'Prepare for BigQuery Country' >> beam.Map(prepare_for_bigquery)
+            | 'Write Country Data to BigQuery' >> WriteToBigQuery(
+                table=args.country_table,
+                schema={
+                    "fields": [
+                        {"name": "start_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
+                        {"name": "end_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
+                        {"name": "key", "type": "STRING", "mode": "NULLABLE"},
+                        {"name": "total_sales", "type": "FLOAT", "mode": "NULLABLE"},
+                    ]
+                },
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_IF_NEEDED
+            )
+        )
+
+        # Customer-Level Aggregation
+        (
+            sales_data
             | 'Key By Customer' >> beam.Map(lambda record: (record["CustomerID"], record["Sales"]))
-            | 'Aggregate Sales by CustomerID' >> beam.CombinePerKey(sum)
-            | 'Prepare for BigQuery Customer Sales' >> beam.Map(prepare_for_bigquery_customer_sales)
-            | 'Write to BigQuery Customer Table' >> WriteToBigQuery(
+            | 'Aggregate Sales by Customer' >> beam.CombinePerKey(sum)
+            | 'Prepare for BigQuery Customer' >> beam.Map(prepare_for_bigquery)
+            | 'Write Customer Data to BigQuery' >> WriteToBigQuery(
                 table=args.customer_table,
                 schema={
                     "fields": [
                         {"name": "start_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
                         {"name": "end_date_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
-                        {"name": "customer", "type": "STRING", "mode": "NULLABLE"},
-                        {"name": "total_sales", "type": "FLOAT", "mode": "NULLABLE"}
+                        {"name": "key", "type": "STRING", "mode": "NULLABLE"},
+                        {"name": "total_sales", "type": "FLOAT", "mode": "NULLABLE"},
                     ]
                 },
                 write_disposition=BigQueryDisposition.WRITE_APPEND,

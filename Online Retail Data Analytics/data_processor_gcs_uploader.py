@@ -71,7 +71,6 @@ class SplitDataByDateRegion:
             
             
             if split_by == "region":
-                count = 0
                 unique_values = df["Country"].unique()
                 for value in unique_values:
                     region_df = df[df["Country"] == value]
@@ -79,11 +78,7 @@ class SplitDataByDateRegion:
                     region_df.to_csv(file_name, index=False)
                     self.upload_blob(file_name, f"{self.blob_list[0]}/{value}-Invoice.csv")
                     os.remove(file_name)
-                    count += 1
                     time.sleep(5)
-                    
-                    if count == 5:
-                        break
             
             elif split_by == "day":
                 count = 0
@@ -96,10 +91,11 @@ class SplitDataByDateRegion:
                     date_df.to_csv(file_name, index=False)
                     self.upload_blob(file_name, f"{self.blob_list[1]}/{date}-Invoice.csv")
                     os.remove(file_name)
-                    count += 1
-                    time.sleep(5)
+                    time.sleep(10)
                     
-                    if count == 5:
+                    count += 1
+                    
+                    if count == 1:
                         break
             
             logging.info(f"Data successfully split by {split_by} and uploaded.")
